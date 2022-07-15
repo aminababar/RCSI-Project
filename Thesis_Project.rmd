@@ -1,1 +1,227 @@
 
+---
+title: "Thesis  Project"
+output: html_document
+date: '2022-07-06'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+General Setup
+The model has 3 health states:
+Healthy (H), Sick (S), Dead (D)
+
+```{r}
+cycle_length <- 1 # cycle length equal one year
+n_age_init <- 45 # age at baseline
+n_age_max <- 100 # maximum age of follow up
+n_cycles <- n_age_max - n_age_init # number of cycles
+v_names_states <- c("DFS", "R", "D")
+
+
+```
+
+We use the discount rate for QALY's and Costs of 3% each. 
+The two strategies are going to be:
+Strategy 1- Standard of care
+Strategy 2- Experimental treatment 
+
+```{r}
+n_states <- length(v_names_states) # number of health states
+d_e <- 0.04 # discount rate for QALYs of 4% per cycle
+d_c <- 0.04 # discount rate for costs of 4% per cycle
+v_names_str <- c("Strategy 1", # store the strategy names
+"Strategy 2")
+
+## Transition probabilities (per cycle), hazard ratios and odds ratio (OR)
+
+p_DFSD <- 0.003 #probability of dying in DFS
+p_DFSR <- 0.15 # probability of DFS to Recurrence
+p_RD <- 0.01 # probability of dying in R
+
+# under treatment 2 conditional on surviving
+p_DFSR_str2 <- 0.09
+
+#entire cohort starts in DFS
+v_m_init <- c(DFS = 1, R = 0, D = 0) # initial state vector
+
+## Initialize cohort trace for SoC
+m_M <- matrix(NA,
+nrow = (n_cycles + 1), ncol = n_states,
+dimnames = list(0:n_cycles, v_names_states))
+# Store the initial state vector in the first row of the cohort trace
+m_M[1, ] <- v_m_init
+## Initialize cohort trace for strategies A, B, and AB
+# Structure and initial states are the same as for SoC
+m_M_str1 <- m_M # Strategy 1
+m_M_str2 <- m_M # Strategy 2
+
+## Initialize transition probability matrix for strategy SoC
+m_P <- matrix(0,
+nrow = n_states, ncol = n_states,
+dimnames = list(v_names_states, v_names_states)) # row and column names
+## Fill in matrix
+
+# From DFS
+m_P["DFS", "DFS"] <- (1 - p_DFSD) * (1 - p_DFSR)
+m_P["DFS", "R"] <- (1 - p_DFSD) 
+m_P["DFS", "D"] <- p_DFSD
+
+# From R
+m_P["R", "R"] <- (1 - p_RD)
+m_P["R", "D"] <- p_RD
+
+
+# From D
+m_P["D", "D"] <- 1
+
+## Initialize transition probability matrix for strategy 1 as a copy of SoC's
+m_P_str1 <- m_P
+
+## Initialize transition probability matrix for strategy 2
+m_P_str2 <- m_P
+
+## Update only transition probabilities from S1 involving p_S1S2
+
+m_P_str2["DFS", "DFS"] <- (1 - p_DFSD) * p_DFSR_trt2
+m_P_str2["DFS", "R"] <- p_DFSR_trt2
+
+
+
+# Iterative solution of time-independent cSTM
+for(t in 1:n_cycles){
+# For SoC
+m_M[t + 1, ] <- m_M[t, ] %*% m_P
+# For strategy A
+m_M_str1[t + 1, ] <- m_M_str1[t, ] %*% m_P_str1
+# For strategy B
+m_M_str2[t + 1, ] <- m_M_str2[t, ] %*% m_P_str2
+}
+
+## State rewards
+## Costs
+c_DSF <- 2000 # annual cost of being Healthy
+c_R <- 4000 # annual cost of being Sick
+c_D <- 0 # annual cost of being dead
+
+c_str1 <- 12000 # annual cost of receiving treatment 1
+c_str2 <- 13000 # annual cost of receiving treatment 2
+
+# Utilities
+
+u_DSF <- 1 # annual utility of being Healthy
+u_R <- 0.75 # annual utility of being Sick
+u_D <- 0 # annual utility of being dead
+u_str1 <- 0.95 # annual utility when receiving treatment 1
+
+# Vector of state utilities under SOC
+v_u_SoC <- c(DSF = u_DSF, R = u_R, D = u_D) * cycle_length
+
+# Vector of state costs under SoC
+v_c_SoC <- c(DSF = c_DSF, R = c_R, D = c_D) * cycle_length
+
+
+# Vector of state utilities for strategy 1
+v_u_str1 <- c(DSF = u_DSF, R = u_str1, D = u_D) * cycle_length
+
+# Vector of state utilities for strategy 2
+v_u_str2 <- c(DSF = u_DSF, R = u_R, D = u_D) * cycle_length
+
+# Vector of state costs for strategy 1
+v_c_str1 <- c(DSF = c_DSF,
+R = c_R + c_str2,
+D = c_D) * cycle_length
+
+# Vector of state costs for strategy 2
+v_c_str2 <- c(DSF = c_DSF,
+R = c_R + c_str2,
+D = c_D) * cycle_length
+
+# Vector of QALYs under SoC
+v_qaly_SoC <- m_M %*% v_u_SoC
+# Vector of costs under SoC
+v_cost_SoC <- m_M %*% v_c_SoC
+
+# Vector of QALYs for strategy 1
+v_qaly_str1 <- m_M_str1 %*% v_u_str1
+# Vector of costs for strategy A
+v_cost_str1 <- m_M_str1 %*% v_c_str1
+# Vector of QALYs for strategy B
+v_qaly_str2 <- m_M_str2 %*% v_u_str2
+# Vector of costs for strategy B
+v_cost_str2 <- m_M_str2 %*% v_c_str2
+
+
+
+# First, we define two functions to identify if a number is even or odd
+is_even <- function(x) x %% 2 == 0
+is_odd <- function(x) x %% 2 != 0
+
+## Vector with cycles
+v_cycles <- seq(1, n_cycles + 1)
+
+## Generate 2/3 and 4/3 multipliers for even and odd entries, respectively
+v_wcc <- is_even(v_cycles)*(2/3) + is_odd(v_cycles)*(4/3)
+
+## Substitute 1/3 in first and last entries
+v_wcc[1] <- v_wcc[n_cycles + 1] <- 1/3
+
+# Discount weight for effects
+v_dwe <- 1 / ((1 + (d_e * cycle_length))ˆ(0:n_cycles))
+
+# Discount weight for costs
+v_dwc <- 1 / ((1 + (d_c * cycle_length))ˆ(0:n_cycles))
+
+## Expected discounted QALYs under SoC
+n_tot_qaly_SoC <- t(v_qaly_SoC) %*% (v_dwe * v_wcc)
+
+## Expected discounted costs under SoC
+n_tot_cost_SoC <- t(v_cost_SoC) %*% (v_dwc * v_wcc)
+
+## Expected discounted QALYs for strategy 1
+n_tot_qaly_str1 <- t(v_qaly_str1) %*% (v_dwe * v_wcc)
+
+## Expected discounted costs for strategy 1
+n_tot_cost_str1 <- t(v_cost_str1) %*% (v_dwc * v_wcc)
+
+## Expected discounted QALYs for strategy 2
+n_tot_qaly_str2 <- t(v_qaly_str2) %*% (v_dwe * v_wcc)
+
+## Expected discounted costs for strategy 2
+n_tot_cost_str2 <- t(v_cost_str2) %*% (v_dwc * v_wcc)
+
+
+### Vector of costs
+v_cost_str <- c(n_tot_cost_SoC, n_tot_cost_str1, n_tot_cost_str2)
+
+### Vector of effectiveness
+v_qaly_str <- c(n_tot_qaly_SoC, n_tot_qaly_str1, n_tot_qaly_str2)
+
+### Calculate incremental cost-effectiveness ratios (ICERs)
+df_cea <- dampack::calculate_icers(cost = v_cost_str,
+effect = v_qaly_str,
+strategies = v_names_str)
+
+
+```
