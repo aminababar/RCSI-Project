@@ -1,0 +1,560 @@
+---
+title: '3-state Markov model in R'
+subtitle: 'with OWSA, TWSA, PSA'
+author: "Amina Babar"
+output:
+  pdf_document: default
+  html_document: default
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+\newpage
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, eval = T)
+
+```
+
+Change `eval` to `TRUE` if you want to knit this document.
+
+```{r}
+rm(list = ls())  # clear memory (removes all the variables from the workspace)
+```
+
+# 01 Load packages
+
+```{r}
+if (!require('pacman')) install.packages('pacman'); library(pacman) # use this package to conveniently install other packages
+# load (install if required) packages from CRAN
+p_load("diagram", "dampack", "reshape2") 
+# install_github("DARTH-git/darthtools", force = TRUE) Uncomment if there is a newer version
+p_load_gh("DARTH-git/darthtools")
+```
+
+# 02 Load functions
+
+```{r}
+# all functions are in the darthtools package
+```
+
+# 03 Input model parameters
+
+```{r}
+## General setup
+n_cycles        <- 60                            # number of cycles
+v_names_cycles  <- paste("cycle", 0:n_cycles)    # cycle names
+v_names_states  <- c("DFS", "R", "D")  # state names
+n_states        <- length(v_names_states)        # number of health states 
+
+# Discounting factors
+d_c             <- 0.04                          # discount rate for costs 
+d_e             <- 0.04                          # discount rate for QALYs
+
+# Strategy names
+v_names_str     <- c("Standard of Care",         # store the strategy names
+                     "Treatment Exp")
+                      
+n_str           <- length(v_names_str)           # number of strategies
+
+## Transition probabilities
+p_DFSD      <- 0.01  # probability of dying when healthy
+p_DFSR_SoC  <- 0.05  # probability of becoming sick when healthy, conditional on surviving, under standard of care
+p_DFSR_trtExp <- 0.04  # probability of becoming sick when healthy, conditional on surviving, under treatment A
+p_RD      <- 0.1   # probability of dying          
+
+## State rewards
+# Costs and utilities  
+c_DFS       <- 400   # cost of one cycle in healthy state
+c_R      <- 1000  # cost of one cycle in sick state
+c_D       <- 0     # cost of one cycle in dead state
+c_trtExp    <- 800   # cost of treatment A (per cycle) in healthy state
+c_SoC       <- 300 
+u_DFS       <- 1     # utility when healthy 
+u_R       <- 0.5   # utility when sick
+u_D       <- 0     # utility when dead
+d_e       <- 0.04  # discount rate per cycle equal discount of costs and QALYs by 3%
+d_c       <- 0.04  # discount rate per cycle equal discount of costs and QAL  
+
+# Discount weight (equal discounting is assumed for costs and effects)
+v_dwc <- 1 / (1 + d_c) ^ (0:n_cycles) 
+v_dwe <- 1 / (1 + d_e) ^ (0:n_cycles) 
+```
+
+## Draw the state-transition cohort model
+
+```{r}
+m_P_diag <- matrix(0, nrow = n_states, ncol = n_states, dimnames = list(v_names_states, v_names_states))
+m_P_diag["DFS", "R" ]     = "" 
+m_P_diag["DFS", "D" ]     = ""
+m_P_diag["DFS", "DFS" ]  = ""
+m_P_diag["R"   , "D" ]     = ""
+m_P_diag["R"   , "R" ]     = ""
+m_P_diag["D"   , "D" ]     = ""
+layout.fig <- c(2, 1)
+plotmat(t(m_P_diag), t(layout.fig), self.cex = 0.5, curve = 0, arr.pos = 0.8,  
+        latex = T, arr.type = "curved", relsize = 0.85, box.prop = 0.8, 
+        cex = 0.8, box.cex = 0.7, lwd = 1)
+```
+
+# 04 Define and initialize matrices and vectors
+
+## 04.1 Cohort trace
+
+```{r}
+## Initial state vector
+# All starting healthy
+v_s_init <- c("DFS" = 1, "R" = 0, "D" = 0)  
+v_s_init
+
+## Initialize cohort trace for cSTM for all strategies
+m_M_SoC <- matrix(0, 
+                  nrow = (n_cycles + 1), ncol = n_states, 
+                  dimnames = list(v_names_cycles, v_names_states))
+# Store the initial state vector in the first row of the cohort trace
+m_M_SoC[1, ] <- v_s_init
+## Initialize cohort traces
+m_M_trtExp <- m_M_SoC # structure and initial states remain the same
+```
+
+## 04.2 Transition probability matrix
+
+```{r}
+## Initialize transition probability matrix 
+# all transitions to a non-death state are assumed to be conditional on survival 
+m_P_SoC  <- matrix(0,
+                   nrow = n_states, ncol = n_states,
+                   dimnames = list(v_names_states, v_names_states)) # define row and column names
+m_P_SoC
+```
+
+Fill in the transition probability matrix:
+
+```{r}
+## Standard of Care
+# from Healthy
+m_P_SoC["DFS", "DFS"] <- (1 - p_DFSD) * (1 - p_DFSR_SoC)
+m_P_SoC["DFS", "R"]    <- (1 - p_DFSD) *      p_DFSR_trtExp
+m_P_SoC["DFS", "D"]    <-      p_DFSD
+
+# from Sick
+m_P_SoC["R", "R"] <- 1 - p_RD
+m_P_SoC["R", "D"] <-     p_RD
+
+# from Dead
+m_P_SoC["D", "D"] <- 1
+
+## Treatment Exp
+m_P_trtExp <- m_P_SoC
+m_P_trtExp["DFS", "DFS"] <- (1 - p_DFSD) * (1 - p_DFSR_trtExp)
+m_P_trtExp["DFS", "R"]    <- (1 - p_DFSD) *      p_DFSR_trtExp
+
+```
+
+Check if transition probability matrices are valid.
+
+```{r}
+# Check that transition probabilities are in [0, 1]
+check_transition_probability(m_P_SoC,  verbose = TRUE)
+check_transition_probability(m_P_trtExp, verbose = TRUE)
+
+# Check that all rows sum to 1
+check_sum_of_transition_array(m_P_SoC,  n_states = n_states, verbose = TRUE)
+check_sum_of_transition_array(m_P_trtExp, n_states = n_states, verbose = TRUE)
+
+```
+
+# 05 Run Markov model
+
+```{r}
+for (t in 1:n_cycles){  # loop through the number of cycles
+  m_M_SoC [t + 1, ] <- m_M_SoC [t, ] %*% m_P_SoC   # estimate the state vector for the next cycle (t + 1)
+  m_M_trtExp[t + 1, ] <- m_M_trtExp[t, ] %*% m_P_trtExp  # estimate the state vector for the next cycle (t + 1)
+}
+head(m_M_SoC)  # print the first few lines of the matrix
+```
+
+# 06 Compute and Plot Epidemiological Outcomes
+
+## 06.1 Cohort trace
+
+```{r}
+matplot(m_M_SoC, type = 'l', 
+        ylab = "Probability of state occupancy",
+        xlab = "Cycle",
+        main = "Cohort Trace", lwd = 3)  # create a plot of the data
+legend("right", v_names_states, col = c("black", "red", "green"), 
+       lty = 1:3, bty = "n")  # add a legend to the graph
+
+# plot a vertical line that helps identifying at which cycle the prevalence of sick is highest
+abline(v = which.max(m_M_SoC[, "DFS"]), col = "gray")  
+```
+
+## 06.2 Overall Survival (OS)
+
+```{r}
+v_os <- 1 - m_M_SoC[, "D"]    # calculate the overall survival (OS) probability
+v_os <- rowSums(m_M_SoC[, 1:2])  # alternative way of calculating the OS probability   
+
+plot(v_os, type = 'l', 
+     ylim = c(0, 1),
+     ylab = "Survival probability",
+     xlab = "Cycle",
+     main = "Overall Survival")  # create a simple plot showing the OS
+
+# add grid 
+grid(nx = n_cycles, ny = 10, col = "lightgray", lty = "dotted", lwd = par("lwd"), 
+     equilogs = TRUE) 
+```
+
+## 06.2.1 Life Expectancy (LE)
+
+```{r}
+v_le <- sum(v_os)  # summing probability of OS over time  (i.e. life expectancy)
+```
+
+## 06.3 Disease prevalence
+
+```{r}
+v_prev <- m_M_SoC[, "R"]/v_os
+plot(v_prev,
+     ylim = c(0, 1),
+     ylab = "Prevalence",
+     xlab = "Cycle",
+     main = "Disease prevalence")
+```
+
+# 07 Compute Cost-Effectiveness Outcomes
+
+## 07.1 Mean Costs and QALYs
+
+```{r}
+# per cycle
+# calculate expected costs by multiplying cohort trace with the cost vector for the different health states   
+v_tc_SoC  <- m_M_SoC  %*% c(c_DFS + c_SoC, c_R, c_D)  
+v_tc_trtExp <- m_M_trtExp %*% c(c_DFS + c_trtExp, c_R, c_D)  
+
+# calculate expected QALYs by multiplying cohort trace with the utilities for the different health states   
+v_tu_SoC  <- m_M_SoC  %*% c(u_DFS, u_R, u_D)  
+v_tu_trtExp <- m_M_trtExp %*% c(u_DFS, u_R, u_D) 
+
+```
+
+## 07.2 Discounted Mean Costs and QALYs
+
+```{r}
+# Discount costs by multiplying the cost vector with discount weights (v_dwc) 
+tc_d_SoC  <-  t(v_tc_SoC)  %*% v_dwc
+tc_d_trtExp <-  t(v_tc_trtExp) %*% v_dwc
+
+# Discount QALYS by multiplying the QALYs vector with discount weights (v_dwe)
+tu_d_SoC  <-  t(v_tu_SoC)  %*% v_dwe
+tu_d_trtExp <-  t(v_tu_trtExp) %*% v_dwe
+
+
+# Store them into a vector
+v_tc_d <- c(tc_d_SoC, tc_d_trtExp)
+v_tu_d <- c(tu_d_SoC, tu_d_trtExp)
+
+# Dataframe with discounted costs and effectiveness
+df_ce <- data.frame(Strategy = v_names_str,
+                    Cost     = v_tc_d, 
+                    Effect   = v_tu_d)
+df_ce
+```
+
+## 07.3 Compute ICERs of the Markov model
+
+```{r}
+df_cea <- calculate_icers(cost       = df_ce$Cost,
+                          effect     = df_ce$Effect,
+                          strategies = df_ce$Strategy
+                          )
+df_cea
+```
+
+## 07.4 Plot frontier of the Markov model
+
+```{r}
+plot(df_cea, effect_units = "QALYs")
+```
+
+# 08 Deterministic Sensitivity Analysis
+
+## 08.1 List of input parameters
+
+Create list `l_params_all` with all input probabilities, cost and utilities.
+
+```{r}
+l_params_all <- as.list(data.frame(
+  p_DFSD      = p_DFSD,  # probability of dying when healthy
+  p_DFSR_SoC  = p_DFSR_SoC,  # probability of becoming sick when healthy, under standard of care
+  p_DFSR_trtExp = p_DFSR_trtExp,  # probability of becoming sick when healthy, under treatment A
+  p_RD      = p_RD,   # probability of dying when sick
+  c_DFS       = c_DFS,   # cost of one cycle in healthy state
+  c_SoC   = c_SoC,
+  c_R       = c_R,  # cost of one cycle in sick state
+  c_D       = c_D,     # cost of one cycle in dead state
+  c_trtExp    = c_trtExp,   # cost of treatment A (per cycle)
+  u_DFS       = u_DFS,     # utility when healthy 
+  u_R       = u_R,   # utility when sick
+  u_D       = u_D,     # utility when dead
+  d_e       = d_e,  # discount factor for effectiveness
+  d_c       = d_c   # discount factor for costs
+))
+
+# store the parameter names into a vector
+v_names_params <- names(l_params_all)
+```
+
+## 08.2 Load Sick-Sicker Markov model function
+
+```{r}
+source("Functions_markov_3state.R")
+# Test function
+calculate_ce_out(l_params_all)
+```
+
+## 08.3 One-way sensitivity analysis (OWSA)
+
+```{r}
+options(scipen = 999) # disabling scientific notation in R
+# dataframe containing all parameters, their base case values, and the min and 
+# max values of the parameters of interest 
+df_params_owsa <- data.frame(pars = c("c_trtExp", "c_SoC", "c_R", "c_DFS", "u_DFS", "u_R", "p_DFSR_SoC", "p_DFSR_trtExp", "p_DFSD", "p_RD"),
+                             min  = c(200 ,100, 500, 100, 0.5, 0.1, 0.01, 0.01, 0.001, 0.05 ),  # min parameter values
+                             max  = c(1200, 1000, 2000, 1000, 1, 0.9, 0.2, 0.2, 0.2, 0.5)  # max parameter values
+                             )
+
+owsa_nmb  <- run_owsa_det(params_range     = df_params_owsa,    # dataframe with parameters for OWSA
+                          params_basecase  = l_params_all,      # list with all parameters
+                          nsamp            = 100,               # number of parameter values
+                          FUN              = calculate_ce_out,  # function to compute outputs
+                          outcomes         = c("NMB"),          # output to do the OWSA on
+                          strategies       = v_names_str,       # names of the strategies
+                          n_wtp            = 5000)              # extra argument to pass to FUN
+```
+
+## 08.3.1 Plot OWSA
+
+```{r}
+plot(owsa_nmb, txtsize = 10, n_x_ticks = 4, 
+     facet_scales = "free") +
+     theme(legend.position = "bottom")
+```
+
+## 08.3.2 Optimal strategy with OWSA
+
+```{r}
+owsa_opt_strat(owsa = owsa_nmb, txtsize = 10)
+```
+
+## 08.3.3 Tornado plot
+
+```{r}
+owsa_tornado(owsa = owsa_nmb, txtsize = 11)
+```
+
+## 08.4 Two-way sensitivity analysis (TWSA)
+
+```{r}
+# dataframe containing all parameters, their basecase values, and the min and 
+# max values of the parameters of interest
+df_params_twsa <- data.frame(pars = c("c_SoC", "c_trtExp"),
+                             min  = c(100, 500),  # min parameter values
+                             max  = c(6000, 6000) # max parameter values
+                             )
+
+twsa_nmb <- run_twsa_det(params_range    = df_params_twsa,    # dataframe with parameters for TWSA
+                         params_basecase = l_params_all,      # list with all parameters
+                         nsamp           = 40,                # number of parameter values
+                         FUN             = calculate_ce_out,  # function to compute outputs
+                         outcomes        = "NMB",             # output to do the TWSA on
+                         strategies      = v_names_str,       # names of the strategies
+                         n_wtp           = 5000)              # extra argument to pass to FUN
+```
+
+## 08.4.1 Plot TWSA
+
+```{r}
+plot(twsa_nmb)
+```
+
+# 09 Probabilistic Sensitivity Analysis (PSA)
+
+```{r}
+# Function to generate PSA input dataset
+gen_psa <- function(n_sim = 1000, seed = 071818){
+  set.seed(seed) # set a seed to be able to reproduce the same results
+  df_psa <- data.frame(
+    # Transition probabilities (per cycle), conditional on surviving
+    # probability to become sick when healthy
+     # probability of dying when healthy
+    p_DFSD       = rbeta(n_sim, shape1 = 4,  shape2 = 391),
+    p_DFSR_SoC   = rbeta(n_sim, shape1 = 24, shape2 = 450),  # under standard of care
+    p_DFSR_trtExp  = rbeta(n_sim, shape1 = 15, shape2 = 368),  # under treatment Exp
+  
+
+    # probability of dying when sick
+    p_DFSD       = rbeta(n_sim, shape1 = 22.4, shape2 = 201.6), 
+
+    # Cost vectors with length n_sim
+    # cost of remaining one cycle in state H
+    c_DFS        = rgamma(n_sim, shape = 16, scale = 25), 
+    # cost of remaining one cycle in state S1
+    c_R        = rgamma(n_sim, shape = 100, scale = 10), 
+    # cost of being in the death state
+    c_D        = 0, 
+    # cost of treatment (per cycle)
+    c_SoC    = rgamma(n_sim, shape = 64, scale = 12.5),
+    # cost of treatment (per cycle)
+    c_trtExp    = rgamma(n_sim, shape = 225, scale = 6.67),
+    
+    # Utility vectors with length n_sim 
+    # utility when healthy
+    u_DFS        = rbeta(n_sim, shape1 =  1.5, shape2 = 0.0015), 
+    # utility when sick
+    u_R        = rbeta(n_sim, shape1 = 49.5, shape2 = 49.5), 
+    # utility when dead
+    u_D        = 0                                              
+  )
+  return(df_psa)
+}
+
+
+# Try it
+gen_psa(10) 
+
+# Number of simulations
+n_sim <- 1000
+
+# Generate PSA input dataset
+df_psa_input <- gen_psa(n_sim = n_sim)
+# First six observations
+head(df_psa_input)
+
+# Save the dataframe
+# save dataframe
+#save(df_psa_input, file = "df_psa_input.rda")
+
+
+# Histogram of parameters
+ggplot(melt(df_psa_input, variable.name = "Parameter"), aes(x = value)) +
+       facet_wrap(~Parameter, scales = "free") +
+       geom_histogram(aes(y = ..density..)) +
+       theme_bw(base_size = 16) + 
+       theme(axis.text = element_text(size=8))
+
+# Initialize dataframes with PSA output 
+# Dataframe of costs
+df_c <- as.data.frame(matrix(0, 
+                      nrow = n_sim,
+                      ncol = n_str))
+colnames(df_c) <- v_names_str
+# Dataframe of effectiveness
+df_e <- as.data.frame(matrix(0, 
+                      nrow = n_sim,
+                      ncol = n_str))
+colnames(df_e) <- v_names_str
+```
+
+## 09.1 Conduct probabilistic sensitivity analysis
+
+```{r}
+# Run Markov model on each parameter set of PSA input dataset
+for(i in 1:n_sim){
+  l_out_temp <- calculate_ce_out(df_psa_input[i, ])
+  df_c[i, ] <- l_out_temp$Cost
+  df_e[i, ] <- l_out_temp$Effect
+  # Display simulation progress
+  if(i/(n_sim/10) == round(i/(n_sim/10), 0)) { # display progress every 10%
+    cat('\r', paste(i/n_sim * 100, "% done", sep = " "))
+  }
+}
+```
+
+## 09.2 Create PSA object for dampack
+
+```{r}
+l_psa <- make_psa_obj(cost          = df_c, 
+                      effectiveness = df_e, 
+                      parameters    = df_psa_input, 
+                      strategies    = v_names_str)
+```
+
+## 09.2.1 Save PSA objects
+
+```{r}
+save(df_psa_input, df_c, df_e, v_names_str, n_str, l_psa,
+     file = "markov_3state_PSA_dataset.RData")
+```
+
+Vector with willingness-to-pay (WTP) thresholds.
+
+```{r}
+v_wtp <- seq(0, 30000, by = 1000)
+```
+
+## 09.3.1 Cost-Effectiveness Scatter plot
+
+```{r}
+plot(l_psa, xlim = c(9.5, 22.5))
+```
+
+## 09.4 Conduct CEA with probabilistic output
+
+```{r}
+# Compute expected costs and effects for each strategy from the PSA
+df_out_ce_psa <- summary(l_psa)
+
+# Calculate incremental cost-effectiveness ratios (ICERs)
+df_cea_psa <- calculate_icers(cost       = df_out_ce_psa$meanCost, 
+                              effect     = df_out_ce_psa$meanEffect,
+                              strategies = df_out_ce_psa$Strategy)
+df_cea_psa
+
+# Save CEA table with ICERs
+# As .RData
+save(df_cea_psa, 
+     file = "markov_3state_probabilistic_CEA_results.RData")
+# As .csv
+write.csv(df_cea_psa, 
+          file = "markov_3state_probabilistic_CEA_results.csv")
+```
+
+## 09.4.1 Plot cost-effectiveness frontier
+
+```{r}
+plot(df_cea_psa)
+```
+
+## 09.4.2 Cost-effectiveness acceptability curves (CEACs) and frontier (CEAF)
+
+```{r}
+ceac_obj <- ceac(wtp = v_wtp, psa = l_psa)
+# Regions of highest probability of cost-effectiveness for each strategy
+summary(ceac_obj)
+# CEAC & CEAF plot
+plot(ceac_obj)
+```
+
+## 09.4.3 Expected Loss Curves (ELCs)
+
+The expected loss is the the quantification of the foregone benefits when choosing a suboptimal strategy given current evidence.
+
+```{r}
+elc_obj <- calc_exp_loss(wtp = v_wtp, psa = l_psa)
+elc_obj
+# ELC plot
+plot(elc_obj, log_y = FALSE)
+```
+
+## 09.4.4 Expected value of perfect information (EVPI)
+
+```{r}
+evpi <- calc_evpi(wtp = v_wtp, psa = l_psa)
+# EVPI plot
+plot(evpi, effect_units = "QALY")
+```
