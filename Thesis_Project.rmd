@@ -104,8 +104,8 @@ m_P_str2 <- m_P
 
 ## Update only transition probabilities from S1 involving p_S1S2
 
-m_P_str2["DFS", "DFS"] <- (1 - p_DFSD) * p_DFSR_trt2
-m_P_str2["DFS", "R"] <- p_DFSR_trt2
+m_P_str2["DFS", "DFS"] <- (1 - p_DFSD) * p_DFSR_str2
+m_P_str2["DFS", "R"] <- p_DFSR_str2
 
 
 
